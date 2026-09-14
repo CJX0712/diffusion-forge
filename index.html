@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Diffusion Forge — 扩散模型实验室</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#ffffff;--line:#e4e7ec;--ink:#1f2430;--muted:#6b7280;--accent:#2563eb;--accent2:#0ea5e9;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font:14px/1.55 "Segoe UI","Microsoft YaHei",sans-serif;padding:18px}
+  h1{font-size:20px;margin-bottom:2px}
+  h2{font-size:14px;margin-bottom:8px;color:var(--muted);font-weight:600}
+  .sub{color:var(--muted);font-size:12.5px;margin-bottom:14px}
+  .wrap{display:grid;grid-template-columns:250px 1fr;gap:14px;align-items:start}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+  label{display:block;font-size:12px;color:var(--muted);margin:8px 0 2px}
+  input,select,button{font:inherit}
+  input,select{width:100%;border:1px solid var(--line);border-radius:6px;padding:5px 8px;background:#fff;color:var(--ink)}
+  button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:7px 14px;cursor:pointer;font-weight:600}
+  button.ghost{background:#eef2ff;color:var(--accent)}
+  .row{display:flex;gap:8px;margin-top:12px}
+  .row button{flex:1}
+  #status{font-size:12px;color:var(--muted);margin-top:10px;white-space:pre-wrap}
+  canvas{display:block;background:#fbfcfe;border:1px solid var(--line);border-radius:8px}
+  .panel{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+  .hint{font-size:11.5px;color:var(--muted);margin-top:8px}
+  code{background:#f1f3f7;border-radius:4px;padding:1px 5px;font-size:12px}
+  .cavcap{font-size:11.5px;color:var(--muted);margin-top:4px;text-align:center}
+</style>
+</head>
+<body>
+<h1>Diffusion Forge <span style="color:var(--muted);font-size:13px">· 扩散模型实验室</span></h1>
+<div class="sub">从零手写 DDPM：闭式前向加噪 + MLP 噪声预测网络（Adam）+ DDPM/DDIM 采样，纯 JS 零依赖。<code>x_t = √ᾱ_t·x₀ + √(1−ᾱ_t)·ε</code>，网络学的是「怎么把噪声减回去」。</div>
+
+<div class="wrap">
+  <div class="card">
+    <h2>训练参数</h2>
+    <label>数据集</label>
+    <select id="dataset"><option value="blobs" selected>四簇高斯 blobs</option><option value="roll">瑞士卷 swiss roll</option><option value="moons">双月牙 moons</option></select>
+    <label>扩散步数 T</label><input id="T" type="number" value="50" min="5" max="200">
+    <label>隐藏层宽 hidden</label><input id="hidden" type="number" value="48" min="8" max="128">
+    <label>训练步数 steps</label><input id="steps" type="number" value="1500" min="100" max="10000">
+    <label>批大小 batch</label><input id="batch" type="number" value="64" min="8" max="256">
+    <label>学习率 lr</label><input id="lr" type="number" value="0.002" step="0.001" min="0.0001" max="0.05">
+    <label>随机种子 seed</label><input id="seed" type="number" value="42">
+    <div class="row"><button id="btnTrain">训练</button><button id="btnReset" class="ghost">恢复默认</button></div>
+    <div id="status">未训练</div>
+    <h2 style="margin-top:14px">Loss 曲线（噪声预测 MSE）</h2>
+    <canvas id="loss" width="220" height="110"></canvas>
+    <h2 style="margin-top:14px">噪声调度 β_t / ᾱ_t</h2>
+    <canvas id="sched" width="220" height="110"></canvas>
+    <div class="hint" id="momHint"></div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <div class="card">
+        <h2>训练数据</h2>
+        <canvas id="cData" width="230" height="230"></canvas>
+        <div class="cavcap">x₀ 分布</div>
+      </div>
+      <div class="card">
+        <h2>DDPM 采样</h2>
+        <canvas id="cDdpm" width="230" height="230"></canvas>
+        <div class="cavcap" id="capDdpm">全链随机去噪</div>
+      </div>
+      <div class="card">
+        <h2>DDIM 采样 (η=0)</h2>
+        <canvas id="cDdim" width="230" height="230"></canvas>
+        <div class="cavcap">确定性：同种子同结果</div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h2>前向扩散演示（加噪过程）</h2>
+      <canvas id="cFwd" width="716" height="170"></canvas>
+      <div class="hint">从左到右：x₀ → x₁₂ → x₂₅ → x₃₇ → x_T ≈ 纯噪声。数据信号逐步被高斯噪声淹没，这就是训练时网络看到的输入。</div>
+    </div>
+  </div>
+</div>
+
+<script id="engine">
+(function(){
+"use strict";
+var DIFF={};
+
+function mulberry32(a){
+  return function(){
+    a|=0;a=a+0x6D2B79F5|0;
+    var t=Math.imul(a^a>>>15,1|a);
+    t=t+Math.imul(t^t>>>7,61|t)^t;
+    return ((t^t>>>14)>>>0)/4294967296;
+  };
+}
+DIFF.mulberry32=mulberry32;
+function gauss(rng){
+  var u=0,v=0;
+  while(u===0)u=rng();
+  while(v===0)v=rng();
+  return Math.sqrt(-2*Math.log(u))*Math.cos(6.283185307179586*v);
+}
+DIFF.gauss=gauss;
+function sigmoid(x){return 1/(1+Math.exp(-x));}
+
+/* ---------- 噪声调度 ---------- */
+DIFF.makeBetas=function(T,betaMin,betaMax){
+  betaMin=betaMin||0.002;betaMax=betaMax||0.10;
+  var betas=new Array(T),abar=new Array(T+1);
+  abar[0]=1;
+  for(var t=1;t<=T;t++){
+    var b=betaMin+(betaMax-betaMin)*(t-1)/Math.max(T-1,1);
+    betas[t-1]=b;
+    abar[t]=abar[t-1]*(1-b);
+  }
+  return {betas:betas,abar:abar,T:T};
+};
+
+/* ---------- 前向过程 ---------- */
+/* 闭式解：x_t = sqrt(abar_t) x0 + sqrt(1-abar_t) eps */
+DIFF.fwdClosed=function(x0,t,sched,rng){
+  var s=Math.sqrt(sched.abar[t]),r=Math.sqrt(1-sched.abar[t]);
+  return [s*x0[0]+r*gauss(rng),s*x0[1]+r*gauss(rng)];
+};
+/* 逐步迭代加噪（同一过程的另一个算法路径） */
+DIFF.fwdIter=function(x0,t,sched,rng){
+  var x=[x0[0],x0[1]];
+  for(var k=1;k<=t;k++){
+    var b=sched.betas[k-1];
+    x=[Math.sqrt(1-b)*x[0]+Math.sqrt(b)*gauss(rng),
+       Math.sqrt(1-b)*x[1]+Math.sqrt(b)*gauss(rng)];
+  }
+  return x;
+};
+/* 后验 q(x_{t-1}|x_t,x_0) 闭式参数 */
+DIFF.posterior=function(t,sched){
+  var b=sched.betas[t-1],ab1=sched.abar[t-1],abt=sched.abar[t];
+  return {
+    c0:Math.sqrt(ab1)*b/(1-abt),                    /* x0 系数 */
+    ct:Math.sqrt(1-b)*(1-ab1)/(1-abt),              /* xt 系数 */
+    var:b*(1-ab1)/(1-abt)
+  };
+};
+
+/* ---------- 数据集 ---------- */
+DIFF.data={
+  blobs:function(rng,n){
+    var C=[[-1.8,-1.8],[1.8,-1.8],[-1.8,1.8],[1.8,1.8]],out=[];
+    for(var i=0;i<n;i++){
+      var c=C[Math.floor(rng()*4)];
+      out.push([c[0]+0.35*gauss(rng),c[1]+0.35*gauss(rng)]);
+    }
+    return out;
+  },
+  roll:function(rng,n){
+    var out=[];
+    for(var i=0;i<n;i++){
+      var u=rng(),t=1.25*Math.PI*(1+2*u);
+      out.push([0.14*t*Math.cos(t)+0.10*gauss(rng),0.14*t*Math.sin(t)+0.10*gauss(rng)]);
+    }
+    return out;
+  },
+  moons:function(rng,n){
+    var out=[];
+    for(var i=0;i<n;i++){
+      var u=rng()*Math.PI;
+      if(i%2===0)out.push([Math.cos(u)-0.5+0.08*gauss(rng),Math.sin(u)-0.25+0.08*gauss(rng)]);
+      else out.push([0.5-Math.cos(u)+0.08*gauss(rng),0.25-Math.sin(u)+0.08*gauss(rng)]);
+    }
+    return out;
+  }
+};
+
+/* ---------- MLP（噪声预测网络） ---------- */
+function relu(v){var o=new Float64Array(v.length);for(var i=0;i<v.length;i++)o[i]=v[i]>0?v[i]:0;return o;}
+function dense(W,b,x,nin,nout){
+  var z=new Float64Array(nout);
+  for(var j=0;j<nout;j++){
+    var s=b[j],row=j*nin;
+    for(var k=0;k<nin;k++)s+=W[row+k]*x[k];
+    z[j]=s;
+  }
+  return z;
+}
+/* t → 特征：[u, sin, cos, sin2, cos2]，拼上 x → 输入 7 维 */
+DIFF.tFeat=function(t,T){
+  var u=t/T;
+  return [u,Math.sin(6.2831853*u),Math.cos(6.2831853*u),Math.sin(12.5663706*u),Math.cos(12.5663706*u)];
+};
+DIFF.makeInput=function(xt,t,T){
+  var f=DIFF.tFeat(t,T);
+  return [xt[0],xt[1],f[0],f[1],f[2],f[3],f[4]];
+};
+DIFF.IN_DIM=7;
+
+function mlpInit(sizes,rng){
+  var net={W:[],b:[],sizes:sizes,mW:[],vW:[],mb:[],vb:[],t:0};
+  for(var l=0;l<sizes.length-1;l++){
+    var nin=sizes[l],nout=sizes[l+1],W=new Float64Array(nin*nout);
+    var sc=Math.sqrt(2/nin);
+    for(var i=0;i<W.length;i++)W[i]=(rng()*2-1)*sc;
+    net.W.push(W);net.b.push(new Float64Array(nout));
+    net.mW.push(new Float64Array(nin*nout));net.vW.push(new Float64Array(nin*nout));
+    net.mb.push(new Float64Array(nout));net.vb.push(new Float64Array(nout));
+  }
+  return net;
+}
+DIFF.mlpInit=mlpInit;
+
+/* 单样本前向，返回各层激活 */
+function fwdOne(net,x){
+  var L=net.W.length,a=[x],z=[];
+  for(var l=0;l<L;l++){
+    var zi=dense(net.W[l],net.b[l],a[l],net.sizes[l],net.sizes[l+1]);
+    z.push(zi);
+    a.push(l===L-1?zi:relu(zi));
+  }
+  return {a:a,z:z};
+}
+/* 批量 loss + 解析梯度 */
+function mlpLossAndGrad(net,X,Y){
+  var L=net.W.length,N=X.length,i,l;
+  var gW=net.W.map(function(w){return new Float64Array(w.length);});
+  var gb=net.b.map(function(b){return new Float64Array(b.length);});
+  var loss=0;
+  for(var n=0;n<N;n++){
+    var f=fwdOne(net,X[n]),a=f.a,z=f.z,out=a[L];
+    var d=new Array(out.length);
+    for(i=0;i<out.length;i++){
+      var diff=out[i]-Y[n][i];
+      loss+=diff*diff;
+      d[i]=2*diff/(out.length*N);
+    }
+    for(l=L-1;l>=0;l--){
+      var ain=a[l],nin=net.sizes[l],nout=net.sizes[l+1];
+      for(var j=0;j<nout;j++){
+        gb[l][j]+=d[j];
+        var row=j*nin;
+        for(var k=0;k<nin;k++)gW[l][row+k]+=d[j]*ain[k];
+      }
+      if(l>0){
+        var dp=new Array(nin);
+        for(var k2=0;k2<nin;k2++){
+          var s=0;
+          for(var j2=0;j2<nout;j2++)s+=net.W[l][j2*nin+k2]*d[j2];
+          dp[k2]=z[l-1][k2]>0?s:0;
+        }
+        d=dp;
+      }
+    }
+  }
+  return {loss:loss/(N*2),gW:gW,gb:gb};
+}
+DIFF.mlpLossAndGrad=mlpLossAndGrad;
+DIFF.mlpLossOnly=function(net,X,Y){return mlpLossAndGrad(net,X,Y).loss;};
+
+/* Adam */
+DIFF.adam=function(net,g,lr){
+  var b1=0.9,b2=0.999,eps=1e-8;
+  net.t++;
+  var c1=1-Math.pow(b1,net.t),c2=1-Math.pow(b2,net.t);
+  for(var l=0;l<net.W.length;l++){
+    var W=net.W[l],gw=g.gW[l],mw=net.mW[l],vw=net.vW[l];
+    for(var i=0;i<W.length;i++){
+      mw[i]=b1*mw[i]+(1-b1)*gw[i];
+      vw[i]=b2*vw[i]+(1-b2)*gw[i]*gw[i];
+      W[i]-=lr*(mw[i]/c1)/(Math.sqrt(vw[i]/c2)+eps);
+    }
+    var b=net.b[l],gb2=g.gb[l],mb=net.mb[l],vb=net.vb[l];
+    for(var j=0;j<b.length;j++){
+      mb[j]=b1*mb[j]+(1-b1)*gb2[j];
+      vb[j]=b2*vb[j]+(1-b2)*gb2[j]*gb2[j];
+      b[j]-=lr*(mb[j]/c1)/(Math.sqrt(vb[j]/c2)+eps);
+    }
+  }
+};
+
+/* ---------- 训练 ---------- */
+DIFF.train=function(data,opts){
+  var o={T:50,hidden:48,steps:1500,batch:64,lr:0.002,seed:42,betaMin:0.002,betaMax:0.10};
+  if(opts)for(var k in opts)o[k]=opts[k];
+  var sched=DIFF.makeBetas(o.T,o.betaMin,o.betaMax);
+  var rng=mulberry32(o.seed);
+  var net=mlpInit([DIFF.IN_DIM,o.hidden,o.hidden,2],rng);
+  var lossHist=[];
+  for(var s=0;s<o.steps;s++){
+    var X=[],Y=[];
+    for(var i=0;i<o.batch;i++){
+      var x0=data[Math.floor(rng()*data.length)];
+      var t=1+Math.floor(rng()*o.T);
+      var eps=[gauss(rng),gauss(rng)];
+      var abt=sched.abar[t];
+      var xt=[Math.sqrt(abt)*x0[0]+Math.sqrt(1-abt)*eps[0],
+              Math.sqrt(abt)*x0[1]+Math.sqrt(1-abt)*eps[1]];
+      X.push(DIFF.makeInput(xt,t,o.T));Y.push(eps);
+    }
+    var g=mlpLossAndGrad(net,X,Y);
+    DIFF.adam(net,g,o.lr);
+    lossHist.push(g.loss);
+  }
+  return {net:net,sched:sched,lossHist:lossHist,opts:o};
+};
+
+/* ---------- 采样 ---------- */
+DIFF.sampleDDPM=function(model,n,rng){
+  var T=model.sched.T,net=model.net;
+  var pts=[];
+  for(var i=0;i<n;i++)pts.push([gauss(rng),gauss(rng)]);
+  for(var t=T;t>=1;t--){
+    var b=model.sched.betas[t-1],abt=model.sched.abar[t],ab1=model.sched.abar[t-1];
+    var varP=b*(1-ab1)/(1-abt),stdP=Math.sqrt(varP);
+    for(i=0;i<n;i++){
+      var inp=DIFF.makeInput(pts[i],t,T);
+      var ep=fwdOne(net,inp).a[net.W.length];
+      var mean=[(pts[i][0]-b/Math.sqrt(1-abt)*ep[0])/Math.sqrt(1-b),
+                (pts[i][1]-b/Math.sqrt(1-abt)*ep[1])/Math.sqrt(1-b)];
+      var z=t>1?[stdP*gauss(rng),stdP*gauss(rng)]:[0,0];
+      pts[i]=[mean[0]+z[0],mean[1]+z[1]];
+    }
+  }
+  return pts;
+};
+DIFF.sampleDDIM=function(model,n,eta,rng){
+  var T=model.sched.T,net=model.net;
+  var pts=[];
+  for(var i=0;i<n;i++)pts.push([gauss(rng),gauss(rng)]);
+  for(var t=T;t>=1;t--){
+    var abt=model.sched.abar[t],ab1=model.sched.abar[t-1];
+    var sig=eta*Math.sqrt((1-ab1)/(1-abt))*Math.sqrt(1-abt/ab1);
+    for(i=0;i<n;i++){
+      var inp=DIFF.makeInput(pts[i],t,T);
+      var ep=fwdOne(net,inp).a[net.W.length];
+      var x0h=[(pts[i][0]-Math.sqrt(1-abt)*ep[0])/Math.sqrt(abt),
+               (pts[i][1]-Math.sqrt(1-abt)*ep[1])/Math.sqrt(abt)];
+      if(t===1){pts[i]=x0h;continue;}
+      var r2=1-ab1-sig*sig;if(r2<0)r2=0;
+      pts[i]=[Math.sqrt(ab1)*x0h[0]+Math.sqrt(r2)*ep[0]+sig*gauss(rng),
+              Math.sqrt(ab1)*x0h[1]+Math.sqrt(r2)*ep[1]+sig*gauss(rng)];
+    }
+  }
+  return pts;
+};
+
+/* ---------- 梯度检验 ---------- */
+DIFF.gradCheck=function(seed,eps){
+  seed=seed||3;eps=eps||1e-6;
+  var rng=mulberry32(seed);
+  var net=mlpInit([DIFF.IN_DIM,6,2],rng);
+  var X=[],Y=[];
+  for(var n=0;n<3;n++){
+    X.push([rng(),rng(),rng(),rng(),rng(),rng(),rng()]);
+    Y.push([rng()-0.5,rng()-0.5]);
+  }
+  var an=mlpLossAndGrad(net,X,Y);
+  var maxRel=0;
+  function num(arr,idx){
+    var old=arr[idx];
+    arr[idx]=old+eps;var l1=DIFF.mlpLossOnly(net,X,Y);
+    arr[idx]=old-eps;var l2=DIFF.mlpLossOnly(net,X,Y);
+    arr[idx]=old;
+    return (l1-l2)/(2*eps);
+  }
+  function cmp(a,b){
+    var rel=Math.abs(a-b)/Math.max(Math.abs(a),Math.abs(b),1e-8);
+    if(rel>maxRel)maxRel=rel;
+  }
+  for(var l=0;l<net.W.length;l++){
+    for(var i=0;i<net.W[l].length;i++)cmp(an.gW[l][i],num(net.W[l],i));
+    for(var j=0;j<net.b[l].length;j++)cmp(an.gb[l][j],num(net.b[l],j));
+  }
+  return maxRel;
+};
+
+/* ---------- 统计辅助 ---------- */
+DIFF.moments=function(pts){
+  var n=pts.length,mx=0,my=0;
+  pts.forEach(function(p){mx+=p[0]/n;my+=p[1]/n;});
+  var vxx=0,vyy=0,vxy=0;
+  pts.forEach(function(p){vxx+=(p[0]-mx)*(p[0]-mx)/n;vyy+=(p[1]-my)*(p[1]-my)/n;vxy+=(p[0]-mx)*(p[1]-my)/n;});
+  return {mx:mx,my:my,vxx:vxx,vyy:vyy,vxy:vxy};
+};
+
+globalThis.DIFF=DIFF;
+})();
+</script>
+
+<script id="ui">
+(function(){
+if(typeof document==="undefined")return;
+function $(id){return document.getElementById(id);}
+var model=null,data=null,currentDataset="blobs",BLOBS=[[-1.8,-1.8],[1.8,-1.8],[-1.8,1.8],[1.8,1.8]];
+
+function readOpts(){
+  return {
+    dataset:$("dataset").value,
+    T:Math.max(5,Math.min(200,parseInt($("T").value,10)||50)),
+    hidden:Math.max(8,Math.min(128,parseInt($("hidden").value,10)||48)),
+    steps:Math.max(100,Math.min(10000,parseInt($("steps").value,10)||1500)),
+    batch:Math.max(8,Math.min(256,parseInt($("batch").value,10)||64)),
+    lr:Math.max(0.0001,Math.min(0.05,parseFloat($("lr").value)||0.002)),
+    seed:parseInt($("seed").value,10)||42
+  };
+}
+
+function scatter(ctx,W,H,pts,color,r){
+  /* 坐标域 [-3.2,3.2] */
+  var R=3.2;
+  function px(x){return W/2+x/R*(W/2-8);}
+  function py(y){return H/2-y/R*(H/2-8);}
+  pts.forEach(function(p){
+    ctx.beginPath();ctx.arc(px(p[0]),py(p[1]),r||2.2,0,6.2832);
+    ctx.fillStyle=color;ctx.fill();
+  });
+  ctx.strokeStyle="#e4e7ec";ctx.strokeRect(0.5,0.5,W-1,H-1);
+}
+
+function train(){
+  var o=readOpts();
+  $("status").textContent="训练中…";
+  var rng=DIFF.mulberry32(o.seed);
+  currentDataset=o.dataset;
+  data=DIFF.data[o.dataset](rng,1200);
+  model=DIFF.train(data,{T:o.T,hidden:o.hidden,steps:o.steps,batch:o.batch,lr:o.lr,seed:o.seed});
+  var last=model.lossHist[model.lossHist.length-1];
+  $("status").textContent="就绪 · T="+o.T+" · hidden="+o.hidden+" · steps="+o.steps+
+    "\n最终 loss "+last.toFixed(5);
+  drawAll();
+}
+
+function drawAll(){
+  drawLoss();drawSched();drawData();
+  var rng1=DIFF.mulberry32(model.opts.seed+1);
+  var ddpm=DIFF.sampleDDPM(model,500,rng1);
+  scatter($("cDdpm").getContext("2d"),230,230,ddpm,"rgba(37,99,235,0.75)");
+  var rng2=DIFF.mulberry32(model.opts.seed+2);
+  var ddim=DIFF.sampleDDIM(model,500,0,rng2);
+  scatter($("cDdim").getContext("2d"),230,230,ddim,"rgba(14,165,233,0.75)");
+  $("capDdpm").textContent="500 点 · 同种子可复现";
+  /* 前向演示 */
+  var ctx=$("cFwd").getContext("2d");
+  ctx.clearRect(0,0,716,170);
+  var rng3=DIFF.mulberry32(7);
+  var fr=DIFF.mulberry32(model.opts.seed+3);
+  [0,12,25,37,model.sched.T].forEach(function(t,i){
+    var pts=data.slice(0,140).map(function(x0){return DIFF.fwdClosed(x0,t,model.sched,fr);});
+    ctx.save();ctx.translate(i*146+4,0);ctx.scale(0.36,0.36);
+    ctx.translate(-322,-322);
+    scatter(ctx,716,716,pts,t===0?"#16a34a":"#94a3b8",6);
+    ctx.restore();
+    ctx.fillStyle="#6b7280";ctx.font="11px sans-serif";
+    ctx.fillText("x_"+t,i*146+8,165);
+  });
+  /* 覆盖统计（blobs 才显示） */
+  if(currentDataset!=="blobs"){$("momHint").textContent="";return;}
+  var counts=[0,0,0,0];
+  ddpm.forEach(function(p){
+    var best=0,bd=1e9;
+    BLOBS.forEach(function(c,ci){var d=(p[0]-c[0])*(p[0]-c[0])+(p[1]-c[1])*(p[1]-c[1]);if(d<bd){bd=d;best=ci;}});
+    counts[best]++;
+  });
+  $("momHint").textContent="DDPM 样本簇占比："+counts.map(function(c,i){
+    return (i+1)+"×"+(100*c/500).toFixed(0)+"%";
+  }).join("  ")+"（期望各 25%）";
+}
+
+function drawData(){
+  var ctx=$("cData").getContext("2d");
+  ctx.clearRect(0,0,230,230);
+  scatter(ctx,230,230,data,"rgba(22,163,74,0.6)");
+}
+
+function drawLoss(){
+  var cv=$("loss"),ctx=cv.getContext("2d");
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if(!model||!model.lossHist.length)return;
+  var h=model.lossHist,n=h.length;
+  var mn=Math.min.apply(null,h),mx=Math.max.apply(null,h);
+  ctx.strokeStyle="#2563eb";ctx.lineWidth=1.5;ctx.beginPath();
+  for(var i=0;i<n;i++){
+    var x=6+i/(n-1||1)*(cv.width-12);
+    var y=cv.height-10-(h[i]-mn)/(mx-mn||1)*(cv.height-20);
+    if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+  ctx.fillStyle="#6b7280";ctx.font="10px sans-serif";
+  ctx.fillText(mx.toFixed(3),4,11);ctx.fillText(mn.toFixed(3),4,cv.height-2);
+}
+
+function drawSched(){
+  var cv=$("sched"),ctx=cv.getContext("2d");
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if(!model)return;
+  var s=model.sched;
+  function draw(arr,color,scale){
+    ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();
+    for(var t=0;t<=s.T;t++){
+      var x=6+t/s.T*(cv.width-12);
+      var y=cv.height-10-(arr[t]*scale)*(cv.height-20);
+      if(t===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+  }
+  draw(s.abar,"#2563eb",1);
+  draw(s.betas,"#dc2626",5);
+  ctx.fillStyle="#6b7280";ctx.font="10px sans-serif";
+  ctx.fillText("ᾱ_t（蓝）· β_t×5（红）",6,11);
+}
+
+$("btnTrain").addEventListener("click",train);
+$("btnReset").addEventListener("click",function(){
+  $("dataset").value="blobs";$("T").value=50;$("hidden").value=48;
+  $("steps").value=1500;$("batch").value=64;$("lr").value=0.002;$("seed").value=42;
+  train();
+});
+train();
+})();
+</script>
+</body>
+</html>
