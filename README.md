@@ -1,5 +1,12 @@
 # Diffusion Forge · 扩散模型实验室
 
+<p align="center">
+  <a href="https://github.com/CJX0712/diffusion-forge/actions/workflows/ci.yml"><img src="https://github.com/CJX0712/diffusion-forge/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="https://github.com/CJX0712/diffusion-forge/releases"><img src="https://img.shields.io/github/v/release/CJX0712/diffusion-forge?sort=semver" alt="release"></a>
+  <a href="https://github.com/CJX0712/diffusion-forge/blob/main/LICENSE"><img src="https://img.shields.io/github/license/CJX0712/diffusion-forge" alt="license"></a>
+  <img src="https://img.shields.io/badge/author-%E6%99%A8%E6%98%9F-1f6feb" alt="author">
+</p>
+
 单文件、零依赖、离线可跑的 DDPM 扩散模型实验室。浏览器直接打开 `index.html` 即可。
 从零手写全部组件：闭式前向加噪、后验公式、MLP 噪声预测网络、Adam、DDPM/DDIM 采样，约 300 行纯 JS。
 
