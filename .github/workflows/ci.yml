@@ -1,7 +1,7 @@
 name: ci
 
 # Headless invariant self-check for the single-file HTML lab: the same
-# `_smoke.js` a developer runs locally, executed on a clean machine.
+# `_smoke.js` / `_smoke2.js` a developer runs locally, executed on a clean machine.
 # Author: 晨星
 
 on:
@@ -28,5 +28,11 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Invariant self-check (_smoke.js)
+      - name: Engine invariants v1 (_smoke.js)
         run: node _smoke.js
+
+      - name: Engine invariants v2 (_smoke2.js)
+        run: node _smoke2.js
+
+      - name: UI wiring check (_uicheck.js)
+        run: node _uicheck.js
